@@ -9,6 +9,7 @@ const fsp = fs.promises;
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { finished } = require("stream/promises");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -96,7 +97,9 @@ async function extractZip(buffer, destination) {
     if (!resolved.startsWith(root)) throw new Error("Unsafe ZIP path detected.");
 
     await fsp.mkdir(path.dirname(resolved), { recursive: true });
-    await entry.stream().pipe(require("fs").createWriteStream(resolved));
+    const output = require("fs").createWriteStream(resolved);
+    entry.stream().pipe(output);
+    await finished(output);
     files.push({ path: relative, absolute: resolved });
   }
 
