@@ -267,7 +267,7 @@ async function uploadFilesToGitHub(files, message, target) {
 }
 
 
-const CHUNK_SIZE = 2 * 1024 * 1024;
+const CHUNK_SIZE = 2 * 1024 * 1024; // chunked upload
 const chunkUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: CHUNK_SIZE, files: 1 }
