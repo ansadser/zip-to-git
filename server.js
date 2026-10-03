@@ -349,5 +349,5 @@ setInterval(() => {
 }, 15 * 60 * 1000).unref();
 
 app.listen(PORT, () => {
-  console.log(`zip-to-git listening on port ${PORT}`);
+  console.log(`zip-to-git listening on port ${PORT} (trust proxy enabled)`);
 });
