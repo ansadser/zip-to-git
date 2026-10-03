@@ -266,6 +266,128 @@ async function uploadFilesToGitHub(files, message, target) {
   return commit.data.sha;
 }
 
+
+const CHUNK_SIZE = 2 * 1024 * 1024;
+const chunkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: CHUNK_SIZE, files: 1 }
+});
+const activeUploads = new Map();
+const jobs = new Map();
+
+async function processArchive(job) {
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "zip-to-git-job-"));
+  try {
+    job.status = "processing";
+    const archivePath = path.join(tempDir, "upload.zip");
+    for (let i = 0; i < job.totalChunks; i++) {
+      await fsp.appendFile(archivePath, await fsp.readFile(path.join(job.uploadDir, `chunk-${i}`)));
+    }
+    await extractZip(await fsp.readFile(archivePath), tempDir);
+    const safeFiles = await walkFiles(tempDir);
+    if (!safeFiles.length) throw new Error("The ZIP file contains no files.");
+    if (safeFiles.length > 1000) throw new Error("ZIP contains too many files (maximum 1000).");
+    job.progress = 15;
+    const commitSha = await uploadFilesToGitHub(safeFiles, `Upload ZIP: ${job.originalName}`, job.target);
+    job.status = "completed";
+    job.progress = 100;
+    job.result = {
+      ok: true,
+      message: "Upload completed successfully.",
+      files: safeFiles.length,
+      commitSha,
+      repository: `${job.target.owner}/${job.target.repo}`,
+      branch: job.target.branch
+    };
+  } catch (error) {
+    console.error("Upload job failed:", error);
+    job.status = "failed";
+    job.error = error?.message || "Upload failed.";
+  } finally {
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    await fsp.rm(job.uploadDir, { recursive: true, force: true }).catch(() => {});
+    activeUploads.delete(job.uploadId);
+  }
+}
+
+app.post("/api/upload/start", requireAuth, async (req, res) => {
+  try {
+    const fileName = typeof req.body?.fileName === "string" ? req.body.fileName : "";
+    const fileSize = Number(req.body?.fileSize);
+    const totalChunks = Number(req.body?.totalChunks);
+    if (!fileName.toLowerCase().endsWith(".zip")) return res.status(400).json({ error: "Only .zip files are allowed." });
+    if (!Number.isSafeInteger(fileSize) || fileSize <= 0 || fileSize > maxZipSize) {
+      return res.status(413).json({ error: `ZIP file is too large. Maximum ${Math.round(maxZipSize / 1024 / 1024)} MB.` });
+    }
+    if (!Number.isSafeInteger(totalChunks) || totalChunks < 1 || totalChunks > 1000) {
+      return res.status(400).json({ error: "Invalid upload size." });
+    }
+
+    const target = await getTargetRepo(req.body?.repository);
+    const uploadId = crypto.randomBytes(18).toString("hex");
+    const uploadDir = await fsp.mkdtemp(path.join(os.tmpdir(), "zip-to-git-upload-"));
+    activeUploads.set(uploadId, {
+      uploadId,
+      ownerToken: req.authToken || "",
+      uploadDir,
+      totalChunks,
+      originalName: path.basename(fileName),
+      target
+    });
+    res.json({ uploadId, chunkSize: CHUNK_SIZE, totalChunks });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error?.message || "Could not start upload." });
+  }
+});
+
+app.post("/api/upload/chunk", requireAuth, chunkUpload.single("chunk"), async (req, res) => {
+  try {
+    const uploadId = typeof req.body?.uploadId === "string" ? req.body.uploadId : "";
+    const index = Number(req.body?.index);
+    const state = activeUploads.get(uploadId);
+    if (!state || state.ownerToken !== (req.authToken || "")) return res.status(404).json({ error: "Upload session not found. Please start again." });
+    if (!Number.isInteger(index) || index < 0 || index >= state.totalChunks) return res.status(400).json({ error: "Invalid chunk number." });
+    if (!req.file) return res.status(400).json({ error: "Missing upload chunk." });
+    await fsp.writeFile(path.join(state.uploadDir, `chunk-${index}`), req.file.buffer);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error?.message || "Chunk upload failed." });
+  }
+});
+
+app.post("/api/upload/complete", requireAuth, async (req, res) => {
+  try {
+    const uploadId = typeof req.body?.uploadId === "string" ? req.body.uploadId : "";
+    const state = activeUploads.get(uploadId);
+    if (!state || state.ownerToken !== (req.authToken || "")) return res.status(404).json({ error: "Upload session not found. Please start again." });
+
+    for (let i = 0; i < state.totalChunks; i++) {
+      try { await fsp.access(path.join(state.uploadDir, `chunk-${i}`)); }
+      catch { return res.status(400).json({ error: `Missing upload chunk ${i + 1} of ${state.totalChunks}.` }); }
+    }
+
+    const jobId = crypto.randomBytes(18).toString("hex");
+    jobs.set(jobId, {
+      jobId, uploadId, uploadDir: state.uploadDir, totalChunks: state.totalChunks,
+      originalName: state.originalName, target: state.target, status: "queued", progress: 0
+    });
+    activeUploads.delete(uploadId);
+    setImmediate(() => processArchive(jobs.get(jobId)));
+    res.status(202).json({ ok: true, jobId });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error?.message || "Could not finish upload." });
+  }
+});
+
+app.get("/api/upload/status/:jobId", requireAuth, (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "Upload job not found." });
+  res.json({ status: job.status, progress: job.progress || 0, result: job.result || null, error: job.error || null });
+});
+ 
 app.get("/api/repos", requireAuth, async (_req, res) => {
   try {
     res.json({ repositories: await getAllowedRepositories() });
