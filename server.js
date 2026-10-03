@@ -106,8 +106,22 @@ async function extractZip(buffer, destination) {
   const directory = await unzipper.Open.buffer(buffer);
   const files = [];
 
+  // If the ZIP has one common top-level folder, strip that folder so its
+  // contents are uploaded directly to the repository root.
+  const entryPaths = directory.files
+    .map((entry) => entry.path.replace(/\\/g, "/"))
+    .filter((entry) => entry && !entry.endsWith("/"));
+  const firstParts = entryPaths.map((entry) => entry.split("/")[0]);
+  const commonRoot = firstParts.length && firstParts.every((part) => part === firstParts[0])
+    ? firstParts[0]
+    : "";
+
   for (const entry of directory.files) {
-    const relative = safeZipPath(entry.path);
+    const rawPath = entry.path.replace(/\\/g, "/");
+    const strippedPath = commonRoot && rawPath.startsWith(commonRoot + "/")
+      ? rawPath.slice(commonRoot.length + 1)
+      : rawPath;
+    const relative = safeZipPath(strippedPath);
     if (!relative) continue;
 
     const target = path.join(destination, relative);
