@@ -246,8 +246,16 @@ app.get("/api/repos", requireAuth, async (_req, res) => {
   }
 });
 
-app.get("/api/status", (req, res) => {
-  res.json({ authenticated: req.session?.authenticated === true });
+app.get("/api/status", async (req, res) => {
+  const authenticated = req.session?.authenticated === true;
+  if (!authenticated) return res.json({ authenticated: false });
+  try {
+    const repositories = await getAllowedRepositories();
+    res.json({ authenticated: true, repositories });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ authenticated: true, error: "Could not load repositories." });
+  }
 });
 
 app.post("/api/login", loginLimiter, (req, res) => {
