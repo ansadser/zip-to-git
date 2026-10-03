@@ -29,7 +29,7 @@ async function loadRepositories(repositoriesFromStatus = null) {
     if (repositoriesFromStatus) {
       data = { repositories: repositoriesFromStatus };
     } else {
-      const response = await fetch("/api/repos", { credentials: "same-origin" });
+      const response = await fetch("/api/repos", { credentials: "include", cache: "no-store" });
       data = await response.json();
       if (!response.ok) throw new Error(data.error || "Could not load repositories.");
     }
@@ -50,7 +50,7 @@ async function loadRepositories(repositoriesFromStatus = null) {
 }
 
 async function checkSession() {
-  const response = await fetch("/api/status", { credentials: "same-origin" });
+  const response = await fetch("/api/status", { credentials: "include", cache: "no-store" });
   const data = await response.json();
   showApp(data.authenticated);
   if (data.authenticated && data.repositories) loadRepositories(data.repositories);
@@ -60,6 +60,7 @@ loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   loginError.textContent = "";
   const response = await fetch("/api/login", {
+    credentials: "include",
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password: password.value })
@@ -74,7 +75,7 @@ loginForm.addEventListener("submit", async (event) => {
 });
 
 $("logout").addEventListener("click", async () => {
-  await fetch("/api/logout", { method: "POST" });
+  await fetch("/api/logout", { method: "POST", credentials: "include" });
   showApp(false);
 });
 
