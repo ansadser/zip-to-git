@@ -9,6 +9,9 @@ const fsp = fs.promises;
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 const { pipeline } = require("stream/promises");
 
 const app = express();
@@ -204,69 +207,68 @@ async function getBranchState(target) {
   return { commitSha, treeSha: commit.data.tree.sha };
 }
 
-async function uploadFilesToGitHub(files, message, target) {
-  const { commitSha, treeSha } = await getBranchState(target);
-
-  const treeItems = [];
-  const concurrency = 12;
-  let nextIndex = 0;
-
-  async function createNextBlob() {
-    while (true) {
-      const index = nextIndex++;
-      if (index >= files.length) return;
-
-      const file = files[index];
-      const data = await fsp.readFile(file.absolute);
-      const blob = await octokit.rest.git.createBlob({
-        owner: target.owner,
-        repo: target.repo,
-        content: data.toString("base64"),
-        encoding: "base64"
-      });
-
-      treeItems[index] = {
-        path: file.path,
-        mode: "100644",
-        type: "blob",
-        sha: blob.data.sha
-      };
-    }
-  }
-
-  await Promise.all(
-    Array.from(
-      { length: Math.min(concurrency, files.length) },
-      () => createNextBlob()
-    )
-  );
-
-  const tree = await octokit.rest.git.createTree({
-    owner: target.owner,
-    repo: target.repo,
-    base_tree: treeSha,
-    tree: treeItems
+async function runGit(args, cwd, env) {
+  const result = await execFileAsync("git", args, {
+    cwd,
+    env,
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 10 * 60 * 1000
   });
-
-  const commit = await octokit.rest.git.createCommit({
-    owner: target.owner,
-    repo: target.repo,
-    message,
-    tree: tree.data.sha,
-    parents: [commitSha]
-  });
-
-  await octokit.rest.git.updateRef({
-    owner: target.owner,
-    repo: target.repo,
-    ref: `heads/${target.branch}`,
-    sha: commit.data.sha,
-    force: false
-  });
-
-  return commit.data.sha;
+  return result;
 }
 
+async function uploadFilesToGitHub(files, message, target) {
+  const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "zip-to-git-repo-"));
+  const askPass = path.join(workDir, "askpass.sh");
+
+  try {
+    await fsp.writeFile(
+      askPass,
+      '#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "x-access-token" ;; *) printf "%s\\n" "$GITHUB_TOKEN" ;; esac\n',
+      { mode: 0o700 }
+    );
+
+    const gitEnv = {
+      ...process.env,
+      GIT_ASKPASS: askPass,
+      GIT_TERMINAL_PROMPT: "0"
+    };
+
+    const remote = `https://github.com/${target.owner}/${target.repo}.git`;
+    const repoDir = path.join(workDir, "repo");
+
+    await runGit(
+      ["clone", "--depth", "1", "--branch", target.branch, remote, repoDir],
+      workDir,
+      gitEnv
+    );
+
+    const gitDir = path.join(repoDir, ".git");
+    for (const file of files) {
+      const destination = path.join(repoDir, file.path);
+      await fsp.mkdir(path.dirname(destination), { recursive: true });
+      await fsp.copyFile(file.absolute, destination);
+    }
+
+    await runGit(["config", "user.name", "ZIP to GitHub"], repoDir, gitEnv);
+    await runGit(["config", "user.email", "zip-to-github@users.noreply.github.com"], repoDir, gitEnv);
+    await runGit(["add", "-A"], repoDir, gitEnv);
+
+    const status = await runGit(["status", "--porcelain"], repoDir, gitEnv);
+    if (!status.stdout.trim()) {
+      const head = await runGit(["rev-parse", "HEAD"], repoDir, gitEnv);
+      return head.stdout.trim();
+    }
+
+    await runGit(["commit", "-m", message], repoDir, gitEnv);
+    await runGit(["push", "origin", `HEAD:${target.branch}`], repoDir, gitEnv);
+
+    const head = await runGit(["rev-parse", "HEAD"], repoDir, gitEnv);
+    return head.stdout.trim();
+  } finally {
+    await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
 
 const CHUNK_SIZE = 2 * 1024 * 1024; // chunked upload
 const chunkUpload = multer({
