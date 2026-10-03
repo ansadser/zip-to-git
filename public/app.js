@@ -4,6 +4,8 @@ const appCard = $("appCard");
 const loginForm = $("loginForm");
 const uploadForm = $("uploadForm");
 const password = $("password");
+const repository = $("repository");
+const repoError = $("repoError");
 const loginError = $("loginError");
 const zip = $("zip");
 const fileName = $("fileName");
@@ -16,6 +18,30 @@ const result = $("result");
 function showApp(authenticated) {
   loginCard.classList.toggle("hidden", authenticated);
   appCard.classList.toggle("hidden", !authenticated);
+  if (authenticated) loadRepositories();
+}
+
+async function loadRepositories() {
+  repoError.textContent = "";
+  repository.innerHTML = '<option value="">Loading repositories…</option>';
+  try {
+    const response = await fetch("/api/repos");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Could not load repositories.");
+    repository.innerHTML = '<option value="">Select a repository</option>';
+    for (const repo of data.repositories) {
+      const option = document.createElement("option");
+      option.value = repo.name;
+      option.textContent = repo.name + (repo.private ? " 🔒" : "");
+      repository.appendChild(option);
+    }
+    if (!data.repositories.length) {
+      repoError.textContent = "No accessible repositories were found for this GitHub token.";
+    }
+  } catch (error) {
+    repository.innerHTML = '<option value="">Could not load repositories</option>';
+    repoError.textContent = error.message;
+  }
 }
 
 async function checkSession() {
@@ -53,7 +79,13 @@ zip.addEventListener("change", () => {
 uploadForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const file = zip.files[0];
+  const selectedRepo = repository.value;
+  if (!selectedRepo) {
+    repoError.textContent = "Please select a repository.";
+    return;
+  }
   if (!file) return;
+  repoError.textContent = "";
 
   result.className = "result hidden";
   progress.classList.remove("hidden");
@@ -62,6 +94,7 @@ uploadForm.addEventListener("submit", (event) => {
   uploadButton.disabled = true;
 
   const formData = new FormData();
+  formData.append("repository", selectedRepo);
   formData.append("zip", file);
 
   const xhr = new XMLHttpRequest();
