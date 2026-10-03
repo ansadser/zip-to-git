@@ -106,67 +106,106 @@ zip.addEventListener("change", () => {
   fileName.textContent = zip.files[0]?.name || "Choose a ZIP file";
 });
 
-uploadForm.addEventListener("submit", (event) => {
+uploadForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const file = zip.files[0];
   const selectedRepo = repository.value;
-  if (!selectedRepo) {
-    repoError.textContent = "Please select a repository.";
-    return;
-  }
+  if (!selectedRepo) { repoError.textContent = "Please select a repository."; return; }
   if (!file) return;
-  repoError.textContent = "";
 
+  repoError.textContent = "";
   result.className = "result hidden";
   progress.classList.remove("hidden");
   barFill.style.width = "0%";
-  progressText.textContent = "Uploading ZIP…";
+  progressText.textContent = "Starting upload…";
   uploadButton.disabled = true;
 
-  const formData = new FormData();
-  formData.append("repository", selectedRepo);
-  formData.append("zip", file);
+  const CHUNK_SIZE = 2 * 1024 * 1024;
 
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/upload");
-  xhr.withCredentials = true;
-  if (authToken) xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
+  try {
+    const startResponse = await fetch("/api/upload/start", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        fileName: file.name,
+        fileSize: file.size,
+        totalChunks: Math.ceil(file.size / CHUNK_SIZE),
+        repository: selectedRepo
+      })
+    });
+    const startData = await startResponse.json();
+    if (!startResponse.ok) throw new Error(startData.error || "Could not start upload.");
 
-  xhr.upload.onprogress = (event) => {
-    if (event.lengthComputable) {
-      const percent = Math.round((event.loaded / event.total) * 100);
-      barFill.style.width = percent + "%";
-      progressText.textContent = percent < 100 ? `Uploading ZIP… ${percent}%` : "Extracting and committing…";
+    for (let index = 0; index < startData.totalChunks; index++) {
+      const chunk = file.slice(index * CHUNK_SIZE, Math.min(file.size, (index + 1) * CHUNK_SIZE));
+      let attempts = 0;
+      while (true) {
+        try {
+          const formData = new FormData();
+          formData.append("uploadId", startData.uploadId);
+          formData.append("index", String(index));
+          formData.append("chunk", chunk, file.name);
+
+          const response = await fetch("/api/upload/chunk", {
+            method: "POST",
+            credentials: "include",
+            headers: authHeaders(),
+            body: formData
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "Chunk upload failed.");
+
+          const percent = Math.round(((index + 1) / startData.totalChunks) * 100);
+          barFill.style.width = percent + "%";
+          progressText.textContent = `Uploading ZIP… ${percent}%`;
+          break;
+        } catch (error) {
+          attempts++;
+          if (attempts >= 3) throw error;
+          progressText.textContent = `Retrying chunk ${index + 1}…`;
+          await new Promise(resolve => setTimeout(resolve, attempts * 1000));
+        }
+      }
     }
-  };
 
-  xhr.onload = () => {
-    uploadButton.disabled = false;
-    progress.classList.add("hidden");
-    let data = {};
-    try { data = JSON.parse(xhr.responseText); } catch {}
+    progressText.textContent = "Upload received. Processing…";
+    const completeResponse = await fetch("/api/upload/complete", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ uploadId: startData.uploadId })
+    });
+    const completeData = await completeResponse.json();
+    if (!completeResponse.ok) throw new Error(completeData.error || "Could not finish upload.");
 
+    let statusData;
+    do {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const statusResponse = await fetch(`/api/upload/status/${encodeURIComponent(completeData.jobId)}`, {
+        credentials: "include", cache: "no-store", headers: authHeaders()
+      });
+      statusData = await statusResponse.json();
+      if (!statusResponse.ok) throw new Error(statusData.error || "Could not check upload status.");
+      if (statusData.status === "processing") progressText.textContent = "Extracting and committing to GitHub…";
+    } while (statusData.status === "queued" || statusData.status === "processing");
+
+    if (statusData.status !== "completed") throw new Error(statusData.error || "Upload failed.");
+
+    barFill.style.width = "100%";
+    result.className = "result success";
     result.classList.remove("hidden");
-    if (xhr.status >= 200 && xhr.status < 300) {
-      result.className = "result success";
-      result.textContent = `✅ ${data.message}\n\nFiles: ${data.files}\nRepository: ${data.repository}\nBranch: ${data.branch}\nCommit: ${data.commitSha}`;
-      uploadForm.reset();
-      fileName.textContent = "Choose a ZIP file";
-    } else {
-      result.className = "result fail";
-      result.textContent = `❌ ${data.error || "Upload failed."}`;
-    }
-  };
-
-  xhr.onerror = () => {
-    uploadButton.disabled = false;
-    progress.classList.add("hidden");
+    result.textContent = `✅ ${statusData.result.message}\n\nFiles: ${statusData.result.files}\nRepository: ${statusData.result.repository}\nBranch: ${statusData.result.branch}\nCommit: ${statusData.result.commitSha}`;
+    uploadForm.reset();
+    fileName.textContent = "Choose a ZIP file";
+  } catch (error) {
     result.className = "result fail";
     result.classList.remove("hidden");
-    result.textContent = "❌ Network error. Please try again.";
-  };
-
-  xhr.send(formData);
+    result.textContent = `❌ ${error.message || "Upload failed."}`;
+  } finally {
+    uploadButton.disabled = false;
+    progress.classList.add("hidden");
+  }
 });
 
 checkSession();
