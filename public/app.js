@@ -14,6 +14,11 @@ const progress = $("progress");
 const barFill = $("barFill");
 const progressText = $("progressText");
 const result = $("result");
+let authToken = sessionStorage.getItem("zip_to_git_auth") || "";
+
+function authHeaders() {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {};
+}
 
 function showApp(authenticated) {
   loginCard.classList.toggle("hidden", authenticated);
@@ -29,7 +34,7 @@ async function loadRepositories(repositoriesFromStatus = null) {
     if (repositoriesFromStatus) {
       data = { repositories: repositoriesFromStatus };
     } else {
-      const response = await fetch("/api/repos", { credentials: "include", cache: "no-store" });
+      const response = await fetch("/api/repos", { credentials: "include", cache: "no-store", headers: authHeaders() });
       data = await response.json();
       if (!response.ok) throw new Error(data.error || "Could not load repositories.");
     }
@@ -50,7 +55,7 @@ async function loadRepositories(repositoriesFromStatus = null) {
 }
 
 async function checkSession() {
-  const response = await fetch("/api/status", { credentials: "include", cache: "no-store" });
+  const response = await fetch("/api/status", { credentials: "include", cache: "no-store", headers: authHeaders() });
   const data = await response.json();
   showApp(data.authenticated);
   if (data.authenticated && data.repositories) loadRepositories(data.repositories);
@@ -70,12 +75,30 @@ loginForm.addEventListener("submit", async (event) => {
     loginError.textContent = data.error || "Login failed.";
     return;
   }
+  authToken = data.authToken || "";
+  if (authToken) sessionStorage.setItem("zip_to_git_auth", authToken);
   password.value = "";
+
+  const statusResponse = await fetch("/api/status", {
+    credentials: "include",
+    cache: "no-store",
+    headers: authHeaders()
+  });
+  const statusData = await statusResponse.json();
+  if (!statusData.authenticated) {
+    loginError.textContent = "Login succeeded, but authentication could not be established. Please try again.";
+    authToken = "";
+    sessionStorage.removeItem("zip_to_git_auth");
+    showApp(false);
+    return;
+  }
   showApp(true);
 });
 
 $("logout").addEventListener("click", async () => {
-  await fetch("/api/logout", { method: "POST", credentials: "include" });
+  await fetch("/api/logout", { method: "POST", credentials: "include", headers: authHeaders() });
+  authToken = "";
+  sessionStorage.removeItem("zip_to_git_auth");
   showApp(false);
 });
 
@@ -107,6 +130,7 @@ uploadForm.addEventListener("submit", (event) => {
   const xhr = new XMLHttpRequest();
   xhr.open("POST", "/api/upload");
   xhr.withCredentials = true;
+  if (authToken) xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
 
   xhr.upload.onprogress = (event) => {
     if (event.lengthComputable) {
