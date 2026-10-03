@@ -21,13 +21,18 @@ function showApp(authenticated) {
   if (authenticated) loadRepositories();
 }
 
-async function loadRepositories() {
+async function loadRepositories(repositoriesFromStatus = null) {
   repoError.textContent = "";
   repository.innerHTML = '<option value="">Loading repositories…</option>';
   try {
-    const response = await fetch("/api/repos");
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Could not load repositories.");
+    let data;
+    if (repositoriesFromStatus) {
+      data = { repositories: repositoriesFromStatus };
+    } else {
+      const response = await fetch("/api/repos", { credentials: "same-origin" });
+      data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not load repositories.");
+    }
     repository.innerHTML = '<option value="">Select a repository</option>';
     for (const repo of data.repositories) {
       const option = document.createElement("option");
@@ -45,9 +50,10 @@ async function loadRepositories() {
 }
 
 async function checkSession() {
-  const response = await fetch("/api/status");
+  const response = await fetch("/api/status", { credentials: "same-origin" });
   const data = await response.json();
   showApp(data.authenticated);
+  if (data.authenticated && data.repositories) loadRepositories(data.repositories);
 }
 
 loginForm.addEventListener("submit", async (event) => {
@@ -99,6 +105,7 @@ uploadForm.addEventListener("submit", (event) => {
 
   const xhr = new XMLHttpRequest();
   xhr.open("POST", "/api/upload");
+  xhr.withCredentials = true;
 
   xhr.upload.onprogress = (event) => {
     if (event.lengthComputable) {
