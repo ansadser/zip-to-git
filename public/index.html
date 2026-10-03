@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZIP to GitHub</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section id="loginCard" class="card">
+      <div class="brand">ZIP<span>→</span>GIT</div>
+      <h1>Private GitHub Uploader</h1>
+      <p class="muted">Sign in to upload a ZIP directly to your private repository.</p>
+      <form id="loginForm">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Enter password">
+        <button type="submit">Unlock</button>
+      </form>
+      <p id="loginError" class="error"></p>
+    </section>
+
+    <section id="appCard" class="card hidden">
+      <div class="topbar">
+        <div>
+          <div class="brand small">ZIP<span>→</span>GIT</div>
+          <h1>Upload to GitHub</h1>
+        </div>
+        <button id="logout" class="ghost">Log out</button>
+      </div>
+
+      <form id="uploadForm">
+        <label class="dropzone" for="zip">
+          <input id="zip" name="zip" type="file" accept=".zip,application/zip" required>
+          <span class="icon">📦</span>
+          <strong id="fileName">Choose a ZIP file</strong>
+          <span class="muted">The ZIP will be extracted and committed to GitHub.</span>
+        </label>
+
+        <button id="uploadButton" type="submit">Upload to GitHub</button>
+      </form>
+
+      <div id="progress" class="progress hidden">
+        <div class="bar"><div id="barFill"></div></div>
+        <span id="progressText">Uploading…</span>
+      </div>
+
+      <div id="result" class="result hidden"></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
