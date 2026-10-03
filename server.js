@@ -219,16 +219,16 @@ async function uploadFilesToGitHub(files, message, target) {
   });
 
   const commit = await octokit.rest.git.createCommit({
-    owner: process.env.GITHUB_OWNER,
-    repo: process.env.GITHUB_REPO,
+    owner: target.owner,
+    repo: target.repo,
     message,
     tree: tree.data.sha,
     parents: [commitSha]
   });
 
   await octokit.rest.git.updateRef({
-    owner: process.env.GITHUB_OWNER,
-    repo: process.env.GITHUB_REPO,
+    owner: target.owner,
+    repo: target.repo,
     ref: `heads/${target.branch}`,
     sha: commit.data.sha,
     force: false
