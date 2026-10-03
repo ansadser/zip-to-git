@@ -25,6 +25,7 @@ for (const key of required) {
 const fallbackRepo = process.env.GITHUB_REPO || "";
 const fallbackBranch = process.env.GITHUB_BRANCH || "";
 const maxZipSize = Number(process.env.MAX_ZIP_SIZE || 50 * 1024 * 1024);
+const maxFiles = Number(process.env.MAX_FILES || 10000);
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
@@ -287,7 +288,7 @@ async function processArchive(job) {
     await extractZip(await fsp.readFile(archivePath), extractDir);
     const safeFiles = await walkFiles(extractDir);
     if (!safeFiles.length) throw new Error("The ZIP file contains no files.");
-    if (safeFiles.length > 1000) throw new Error("ZIP contains too many files (maximum 1000).");
+    if (safeFiles.length > maxFiles) throw new Error(`ZIP contains too many files (maximum ${maxFiles}).`);
     job.progress = 15;
     const commitSha = await uploadFilesToGitHub(safeFiles, `Upload ZIP: ${job.originalName}`, job.target);
     job.status = "completed";
