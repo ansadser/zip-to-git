@@ -280,11 +280,12 @@ async function processArchive(job) {
   try {
     job.status = "processing";
     const archivePath = path.join(tempDir, "upload.zip");
+    const extractDir = path.join(tempDir, "extracted");
     for (let i = 0; i < job.totalChunks; i++) {
       await fsp.appendFile(archivePath, await fsp.readFile(path.join(job.uploadDir, `chunk-${i}`)));
     }
-    await extractZip(await fsp.readFile(archivePath), tempDir);
-    const safeFiles = await walkFiles(tempDir);
+    await extractZip(await fsp.readFile(archivePath), extractDir);
+    const safeFiles = await walkFiles(extractDir);
     if (!safeFiles.length) throw new Error("The ZIP file contains no files.");
     if (safeFiles.length > 1000) throw new Error("ZIP contains too many files (maximum 1000).");
     job.progress = 15;
