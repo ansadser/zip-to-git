@@ -207,22 +207,38 @@ async function uploadFilesToGitHub(files, message, target) {
   const { commitSha, treeSha } = await getBranchState(target);
 
   const treeItems = [];
-  for (const file of files) {
-    const data = await fsp.readFile(file.absolute);
-    const blob = await octokit.rest.git.createBlob({
-      owner: target.owner,
-      repo: target.repo,
-      content: data.toString("base64"),
-      encoding: "base64"
-    });
+  const concurrency = 12;
+  let nextIndex = 0;
 
-    treeItems.push({
-      path: file.path,
-      mode: "100644",
-      type: "blob",
-      sha: blob.data.sha
-    });
+  async function createNextBlob() {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= files.length) return;
+
+      const file = files[index];
+      const data = await fsp.readFile(file.absolute);
+      const blob = await octokit.rest.git.createBlob({
+        owner: target.owner,
+        repo: target.repo,
+        content: data.toString("base64"),
+        encoding: "base64"
+      });
+
+      treeItems[index] = {
+        path: file.path,
+        mode: "100644",
+        type: "blob",
+        sha: blob.data.sha
+      };
+    }
   }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, files.length) },
+      () => createNextBlob()
+    )
+  );
 
   const tree = await octokit.rest.git.createTree({
     owner: target.owner,
