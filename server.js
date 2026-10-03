@@ -94,7 +94,8 @@ function safeZipPath(input) {
   if (!normalized || normalized.endsWith("/")) return null;
   if (normalized.includes("\0")) throw new Error("Invalid ZIP path.");
   const clean = path.posix.normalize(normalized);
-  if (clean === "." || clean.startsWith("../") || clean.includes("/../") || clean.startsWith("/")) {
+  if (clean === "." || clean.startsWith("../") || clean.includes("/../") || clean.startsWith("/") ||
+      clean === ".git" || clean.startsWith(".git/")) {
     throw new Error("Unsafe ZIP path detected.");
   }
   return clean;
