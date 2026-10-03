@@ -9,7 +9,7 @@ const fsp = fs.promises;
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
-const { finished } = require("stream/promises");
+const { pipeline } = require("stream/promises");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
