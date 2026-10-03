@@ -14,7 +14,7 @@ const { pipeline } = require("stream/promises");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const required = ["APP_PASSWORD", "GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"];
+const required = ["APP_PASSWORD", "GITHUB_TOKEN", "GITHUB_OWNER"];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`Missing required environment variable: ${key}`);
@@ -22,7 +22,8 @@ for (const key of required) {
   }
 }
 
-const branch = process.env.GITHUB_BRANCH || "main";
+const fallbackRepo = process.env.GITHUB_REPO || "";
+const fallbackBranch = process.env.GITHUB_BRANCH || "";
 const maxZipSize = Number(process.env.MAX_ZIP_SIZE || 50 * 1024 * 1024);
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 
@@ -98,8 +99,7 @@ async function extractZip(buffer, destination) {
 
     await fsp.mkdir(path.dirname(resolved), { recursive: true });
     const output = require("fs").createWriteStream(resolved);
-    entry.stream().pipe(output);
-    await finished(output);
+    await pipeline(entry.stream(), output);
     files.push({ path: relative, absolute: resolved });
   }
 
@@ -121,32 +121,84 @@ async function walkFiles(root) {
   return result;
 }
 
-async function getBranchState() {
-  const ref = await octokit.rest.git.getRef({
+function normalizeRepoName(value) {
+  if (typeof value !== "string") return "";
+  const repo = value.trim();
+  return /^[A-Za-z0-9._-]+$/.test(repo) ? repo : "";
+}
+
+async function getAllowedRepositories() {
+  const repos = [];
+  for (let page = 1; page <= 10; page++) {
+    const response = await octokit.rest.repos.listForAuthenticatedUser({
+      per_page: 100,
+      page,
+      affiliation: "owner,collaborator,organization_member",
+      sort: "full_name",
+      direction: "asc"
+    });
+    repos.push(...response.data);
+    if (response.data.length < 100) break;
+  }
+  return repos
+    .filter((repo) => repo.owner?.login === process.env.GITHUB_OWNER && !repo.archived)
+    .map((repo) => ({
+      name: repo.name,
+      fullName: repo.full_name,
+      private: repo.private,
+      defaultBranch: repo.default_branch || "main"
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function getTargetRepo(repoName) {
+  const repo = normalizeRepoName(repoName) || normalizeRepoName(fallbackRepo);
+  if (!repo) throw new Error("Please select a repository.");
+
+  const response = await octokit.rest.repos.get({
     owner: process.env.GITHUB_OWNER,
-    repo: process.env.GITHUB_REPO,
-    ref: `heads/${branch}`
+    repo
+  });
+
+  if (response.data.owner?.login !== process.env.GITHUB_OWNER) {
+    throw new Error("Selected repository is not allowed.");
+  }
+
+  return {
+    owner: process.env.GITHUB_OWNER,
+    repo,
+    branch: fallbackRepo === repo && fallbackBranch
+      ? fallbackBranch
+      : (response.data.default_branch || "main")
+  };
+}
+
+async function getBranchState(target) {
+  const ref = await octokit.rest.git.getRef({
+    owner: target.owner,
+    repo: target.repo,
+    ref: `heads/${target.branch}`
   });
   const commitSha = ref.data.object.sha;
 
   const commit = await octokit.rest.git.getCommit({
-    owner: process.env.GITHUB_OWNER,
-    repo: process.env.GITHUB_REPO,
+    owner: target.owner,
+    repo: target.repo,
     commit_sha: commitSha
   });
 
   return { commitSha, treeSha: commit.data.tree.sha };
 }
 
-async function uploadFilesToGitHub(files, message) {
-  const { commitSha, treeSha } = await getBranchState();
+async function uploadFilesToGitHub(files, message, target) {
+  const { commitSha, treeSha } = await getBranchState(target);
 
   const treeItems = [];
   for (const file of files) {
     const data = await fsp.readFile(file.absolute);
     const blob = await octokit.rest.git.createBlob({
-      owner: process.env.GITHUB_OWNER,
-      repo: process.env.GITHUB_REPO,
+      owner: target.owner,
+      repo: target.repo,
       content: data.toString("base64"),
       encoding: "base64"
     });
@@ -160,8 +212,8 @@ async function uploadFilesToGitHub(files, message) {
   }
 
   const tree = await octokit.rest.git.createTree({
-    owner: process.env.GITHUB_OWNER,
-    repo: process.env.GITHUB_REPO,
+    owner: target.owner,
+    repo: target.repo,
     base_tree: treeSha,
     tree: treeItems
   });
@@ -177,13 +229,22 @@ async function uploadFilesToGitHub(files, message) {
   await octokit.rest.git.updateRef({
     owner: process.env.GITHUB_OWNER,
     repo: process.env.GITHUB_REPO,
-    ref: `heads/${branch}`,
+    ref: `heads/${target.branch}`,
     sha: commit.data.sha,
     force: false
   });
 
   return commit.data.sha;
 }
+
+app.get("/api/repos", requireAuth, async (_req, res) => {
+  try {
+    res.json({ repositories: await getAllowedRepositories() });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Could not load repositories." });
+  }
+});
 
 app.get("/api/status", (req, res) => {
   res.json({ authenticated: req.session?.authenticated === true });
@@ -214,7 +275,8 @@ app.post("/api/upload", requireAuth, uploadLimiter, upload.single("zip"), async 
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "zip-to-git-"));
 
   try {
-    const files = await extractZip(req.file.buffer, tempDir);
+    const target = await getTargetRepo(req.body?.repository);
+    await extractZip(req.file.buffer, tempDir);
     const safeFiles = await walkFiles(tempDir);
 
     if (!safeFiles.length) {
@@ -226,15 +288,15 @@ app.post("/api/upload", requireAuth, uploadLimiter, upload.single("zip"), async 
     }
 
     const commitMessage = `Upload ZIP: ${req.file.originalname}`;
-    const commitSha = await uploadFilesToGitHub(safeFiles, commitMessage);
+    const commitSha = await uploadFilesToGitHub(safeFiles, commitMessage, target);
 
     res.json({
       ok: true,
       message: "Upload completed successfully.",
       files: safeFiles.length,
       commitSha,
-      repository: `${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}`,
-      branch
+      repository: `${target.owner}/${target.repo}`,
+      branch: target.branch
     });
   } catch (error) {
     console.error(error);
