@@ -28,8 +28,10 @@ const maxZipSize = Number(process.env.MAX_ZIP_SIZE || 50 * 1024 * 1024);
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+const authTokens = new Map();
 
 app.disable("x-powered-by");
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "100kb" }));
 app.use(cookieSession({
   name: "zip_to_git_session",
@@ -68,7 +70,17 @@ const upload = multer({
 
 app.use(express.static(path.join(__dirname, "public")));
 
+function getBearerToken(req) {
+  const header = req.get("authorization") || "";
+  return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+}
+
 function requireAuth(req, res, next) {
+  const bearer = getBearerToken(req);
+  if (bearer && authTokens.has(bearer)) {
+    req.authToken = bearer;
+    return next();
+  }
   if (req.session && req.session.authenticated === true) return next();
   return res.status(401).json({ error: "Unauthorized" });
 }
@@ -248,7 +260,8 @@ app.get("/api/repos", requireAuth, async (_req, res) => {
 });
 
 app.get("/api/status", async (req, res) => {
-  const authenticated = req.session?.authenticated === true;
+  const bearer = getBearerToken(req);
+  const authenticated = (bearer && authTokens.has(bearer)) || req.session?.authenticated === true;
   if (!authenticated) return res.json({ authenticated: false });
   try {
     const repositories = await getAllowedRepositories();
@@ -270,10 +283,14 @@ app.post("/api/login", loginLimiter, (req, res) => {
   if (!valid) return res.status(401).json({ error: "Incorrect password." });
 
   req.session.authenticated = true;
-  res.json({ ok: true });
+  const authToken = crypto.randomBytes(32).toString("hex");
+  authTokens.set(authToken, Date.now() + 1000 * 60 * 60 * 12);
+  res.json({ ok: true, authToken });
 });
 
 app.post("/api/logout", (req, res) => {
+  const bearer = getBearerToken(req);
+  if (bearer) authTokens.delete(bearer);
   req.session = null;
   res.json({ ok: true });
 });
@@ -323,6 +340,13 @@ app.use((err, _req, res, _next) => {
   }
   res.status(400).json({ error: err?.message || "Request failed." });
 });
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, expiresAt] of authTokens) {
+    if (expiresAt <= now) authTokens.delete(token);
+  }
+}, 15 * 60 * 1000).unref();
 
 app.listen(PORT, () => {
   console.log(`zip-to-git listening on port ${PORT}`);
